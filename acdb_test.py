@@ -1,7 +1,5 @@
 import os.path
-import subprocess
 import tempfile
-import time
 
 import pytest
 
@@ -9,9 +7,10 @@ import acdb
 
 
 def driver_easy_case(driver):
-    driver.set('name', 'acdb')
-    assert driver.get('name') == 'acdb'
-    driver.nil('name')
+    driver.set('name', b'acdb')
+    assert driver.get('name') == b'acdb'
+    assert driver.all() == ['name']
+    driver.rm('name')
     with pytest.raises(Exception):
         driver.get('name')
 
@@ -19,11 +18,21 @@ def driver_easy_case(driver):
 def emerge_easy_test(emerge):
     emerge.set('name', 'acdb')
     assert emerge.get('name') == 'acdb'
-    emerge.nil('name')
+    assert emerge.all() == ['name']
+    emerge.rm('name')
     emerge.set('n', 0)
     for _ in range(64):
-        emerge.add('n', 1)
+        emerge.incr('n')
     assert emerge.get('n') == 64
+    emerge.rm('n')
+
+    assert emerge.none('name')
+    emerge.set_none('name', 'acdb')
+    assert emerge.some('name')
+    emerge.set_some('name', 'bcad')
+    assert emerge.get('name') == 'bcad'
+    emerge.set_none('name', 'acdb')
+    assert emerge.get('name') == 'bcad'
 
 
 def test_mem_driver():
@@ -62,11 +71,3 @@ def test_map_driver():
 def test_json_emerge():
     emerge = acdb.mem()
     emerge_easy_test(emerge)
-
-
-def test_http_emerge():
-    with subprocess.Popen(['acdb', '-tls', '/etc/tls']) as p:
-        time.sleep(1)
-        emerge = acdb.cli('127.0.0.1:8080', '/etc/tls')
-        emerge_easy_test(emerge)
-        p.kill()
