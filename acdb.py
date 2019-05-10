@@ -1,40 +1,45 @@
-import base64
 import collections
+import contextlib
 import json
 import os.path
-
-import requests
-import requests.adapters
+import fnmatch
 
 
 class MemDriver:
     def __init__(self):
         self.memcache = {}
 
-    def set(self, k, s):
-        self.memcache[k] = s
+    def set(self, k, v):
+        self.memcache[k] = v
 
     def get(self, k):
         return self.memcache[k]
 
-    def nil(self, k):
+    def all(self):
+        return list(self.memcache.keys())
+
+    def rm(self, k):
         del self.memcache[k]
 
 
 class DocDriver:
     def __init__(self, root):
         self.root = root
-        os.makedirs(self.root, 0o666, exist_ok=True)
+        if not os.path.exists(self.root):
+            os.makedirs(self.root)
 
-    def set(self, k, s):
-        with open(os.path.join(self.root, k), 'w') as f:
-            f.write(s)
+    def set(self, k, v):
+        with open(os.path.join(self.root, k), 'wb') as f:
+            f.write(v)
 
     def get(self, k):
-        with open(os.path.join(self.root, k), 'r') as f:
+        with open(os.path.join(self.root, k), 'rb') as f:
             return f.read()
 
-    def nil(self, k):
+    def all(self):
+        return [e.name for e in os.scandir(self.root)]
+
+    def rm(self, k):
         os.remove(os.path.join(self.root, k))
 
 
@@ -54,7 +59,10 @@ class LruDriver:
         self.dict[k] = s
         return s
 
-    def nil(self, k):
+    def all(self):
+        return list(self.dict.keys())
+
+    def rm(self, k):
         del self.dict[k]
 
 
@@ -68,117 +76,106 @@ class MapDriver:
         self.lru_driver.set(k, s)
 
     def get(self, k):
-        try:
+        with contextlib.suppress(KeyError):
             return self.lru_driver.get(k)
-        except KeyError:
-            pass
         s = self.doc_driver.get(k)
         self.lru_driver.set(k, s)
         return s
 
-    def nil(self, k):
-        self.doc_driver.nil(k)
-        self.lru_driver.nil(k)
+    def all(self):
+        return self.doc_driver.all()
+
+    def rm(self, k):
+        self.doc_driver.rm(k)
+        self.lru_driver.rm(k)
 
 
-class JSONEmerge:
+class Emerge:
     def __init__(self, driver):
         self.driver = driver
 
     def get(self, k):
+        # Get gets and returns the bytes or any error encountered.
         s = self.driver.get(k)
         return json.loads(s)
 
     def set(self, k, v):
-        s = json.dumps(v)
+        # Set sets bytes with given k.
+        s = json.dumps(v).encode()
         self.driver.set(k, s)
 
-    def nil(self, k):
-        self.driver.nil(k)
+    def all(self, p='*'):
+        # All returns all keys. Supported glob-style patterns.
+        #
+        # Supported glob-style patterns:
+        #     h?llo matches hello, hallo and hxllo
+        #     h*llo matches hllo and heeeello
+        #     h[ae]llo matches hello and hallo, but not hillo
+        #     h[^e]llo matches hallo, hbllo, ... but not hello
+        #     h[a-b]llo matches hallo and hbllo
 
-    def add(self, k, n):
-        s = self.driver.get(k)
-        v = json.loads(s)
-        v += n
-        s = json.dumps(v)
-        self.driver.set(k, s)
+        return [e for e in self.driver.all() if fnmatch.fnmatch(e, p)]
 
-    def dec(self, k, n):
-        return self.add(k, -n)
+    def rm(self, k):
+        # Rm dels bytes with given k.
+        self.driver.rm(k)
 
+    def incr_by(self, k, n):
+        # IncrBy increments the number stored at key by n.
+        self.set(k, self.get(k) + n)
 
-class HTTPEmerge:
-    def __init__(self, server, conf):
-        if not server.startswith('https://'):
-            server = 'https://' + server
-        self.server = server
-        self.session = requests.Session()
-        self.session.mount(server, requests.adapters.HTTPAdapter(max_retries=8))
-        ca_crt = os.path.join(conf, 'ca.crt')
-        client_crt = os.path.join(conf, 'client.crt')
-        client_key = os.path.join(conf, 'client.key')
-        self.session.verify = ca_crt
-        self.session.cert = (client_crt, client_key)
+    def incr(self, k):
+        # Incr increments the number stored at key by one.
+        self.incr_by(k, 1)
 
-    def get(self, k):
-        j = {'command': 'GET', 'k': k}
-        resp = self.session.put(self.server, json=j)
-        body = resp.json()
-        if body['err'] != '':
-            raise Exception(body['err'])
-        return json.loads(base64.b64decode(body['v'].encode()))
+    def decr_by(self, k, n):
+        # DecrBy decrements the number stored at key by n.
+        return self.incr_by(k, -n)
 
-    def set(self, k, v):
-        s = json.dumps(v)
-        t = base64.b64encode(s.encode()).decode()
-        j = {'command': 'SET', 'k': k, 'v': t}
-        resp = self.session.put(self.server, json=j)
-        body = resp.json()
-        if body['err'] != '':
-            raise Exception(body['err'])
-        return json.loads(resp.text)
+    def decr(self, k):
+        # Decr decrements the number stored at key by one.
+        return self.decr_by(k, 1)
 
-    def add(self, k, n):
-        s = json.dumps(n)
-        t = base64.b64encode(s.encode()).decode()
-        j = {'command': 'ADD', 'k': k, 'v': t}
-        resp = self.session.put(self.server, json=j)
-        body = resp.json()
-        if body['err'] != '':
-            raise Exception(body['err'])
+    def some(self, k):
+        # Some returns true if the key is some.
+        with contextlib.suppress(Exception):
+            self.get(k)
+            return True
+        return False
 
-    def dec(self, k, n):
-        s = json.dumps(n)
-        t = base64.b64encode(s.encode()).decode()
-        j = {'command': 'DEC', 'k': k, 'v': t}
-        resp = self.session.put(self.server, json=j)
-        body = resp.json()
-        if body['err'] != '':
-            raise Exception(body['err'])
+    def none(self, k):
+        # None returns true if the key is none.
+        with contextlib.suppress(Exception):
+            self.get(k)
+            return False
+        return True
 
-    def nil(self, k):
-        j = {'command': 'DEL', 'k': k}
-        resp = self.session.put(self.server, json=j)
-        body = resp.json()
-        if body['err'] != '':
-            raise Exception(body['err'])
+    def set_some(self, k, v):
+        # Set key to hold value if the key is some.
+        if self.some(k):
+            self.set(k, v)
+
+    def set_none(self, k, v):
+        # Set key to hold value if the key is none.
+        if self.none(k):
+            self.set(k, v)
 
 
 def mem():
-    return JSONEmerge(MemDriver())
+    # Returns a Client with MemDriver.
+    return Emerge(MemDriver())
 
 
 def doc(root):
-    return JSONEmerge(DocDriver(root))
+    # Returns a Client with DocDriver.
+    return Emerge(DocDriver(root))
 
 
 def lru(size):
-    return JSONEmerge(LruDriver(size))
+    # Returns a Client with LruDriver.
+    return Emerge(LruDriver(size))
 
 
 def syn(root):
-    return JSONEmerge(MapDriver(root))
-
-
-def cli(server, conf):
-    return HTTPEmerge(server, conf)
+    # Returns a Client with MapDriver.
+    return Emerge(MapDriver(root))

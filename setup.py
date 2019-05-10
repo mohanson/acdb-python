@@ -1,15 +1,19 @@
+import os.path
 import setuptools
+
+root = os.path.abspath(os.path.dirname(__file__))
+with open(os.path.join(root, 'README.md'), encoding='utf-8') as f:
+    long_description = f.read()
 
 setuptools.setup(
     name='acdb',
-    version='0.0.2',
-    url='https://github.com/mohanson/acdb-python',
+    version='3.7.3',
+    url='https://github.com/pydump/acdb',
     license='MIT',
     author='mohanson',
     author_email='mohanson@outlook.com',
-    description='',
-    py_modules=['acdb'],
-    install_requires=[
-        'requests',
-    ]
+    description='Package acdb manages objects between memory and file system.',
+    long_description=long_description,
+    long_description_content_type='text/markdown',
+    py_modules=['acdb']
 )
